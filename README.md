@@ -4,15 +4,20 @@ This repository contains Copilot-generated Bash scripts for analyzing NCBI genom
 
 The first script, `hmmsearch_metagenome_pipeline.sh`, can analyze genomes or metagenomes from a BioProject, a list of SRA IDs, or WGS master accessions. When necessary, (meta)SPAdes is used to assemble reads before downstream analysis. The second script then extracts contigs with positive HMM hits and runs BLASTN on them to identify the most likely reference sequence or species.
 
+
+## Installation
+
 To ensure that all dependencies are available and compatible, we recommend creating a dedicated Conda environment using the provided YAML file:
 
 ```bash
+
+git clone https://github.com/mredrejo/hmmsearch_metagenome.git
+cd hmmsearch_metagenome
+
 conda env create -f environment_bioconda.yml
 conda activate bioconda
 
-git clone https://github.com/mredrejo/hmmsearch_metagenome.git
-
-chmod +x hmmsearch_metagenome/*.sh
+chmod +x *.sh
 ```
 
 The flowchart below details all the steps in both scripts.
