@@ -5,20 +5,19 @@ This repository contains Copilot-generated Bash scripts for analyzing NCBI genom
 The first script, `hmmsearch_metagenome_pipeline.sh`, can analyze genomes or metagenomes from a BioProject, a list of SRA IDs, or WGS master accessions. When necessary, (meta)SPAdes is used to assemble reads before downstream analysis. The second script,`blast_positive_contigs_remote.sh`, then extracts contigs with positive HMM hits and runs BLASTN on them to identify the most likely reference sequence or species.
 
 
-## Installation
+## Table of contents
 
-To ensure that all dependencies are available and compatible, we recommend creating a dedicated Conda environment using the provided YAML file:
+- [Installation](#installation)
+- [Script 1: (meta)genome searches with an hmm profile](#script-1-metagenome-searches-with-an-hmm-profile)
+  - [Common options](#common-options)
+  - [WGS options](#wgs-mode-options)
+  - [Bioproject/SRA options](#bioproject--sra-mode-options)
+  - [Main results files](#main-result-files)
+- [Script 2: Identify positive contigs by remote BLASTN](#script-2-identify-positive-contigs-by-remote-blastn)
+  - [Outputs](#outputs)
 
-```bash
 
-git clone https://github.com/mredrejo/hmmsearch_metagenome.git
-cd hmmsearch_metagenome
 
-conda env create -f environment_bioconda.yml
-conda activate bioconda
-
-chmod +x *.sh
-```
 
 The flowchart below details all the steps in both scripts.
 
@@ -122,11 +121,58 @@ flowchart TD
     class R3 blastOutput;
 ```
 
+## Installation
+
+To ensure that all dependencies are available and compatible, we recommend creating a dedicated Conda environment using the provided YAML file:
+
+```bash
+
+git clone https://github.com/mredrejo/hmmsearch_metagenome.git
+cd hmmsearch_metagenome
+
+conda env create -f environment_bioconda.yml
+conda activate bioconda
+
+chmod +x *.sh
+```
 
 ## Script 1: (meta)genome searches with an *hmm* profile
+### Common options
 
+| Option                  | Description                                                                                                                                                                                         |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--wgs`                 | Run the pipeline in WGS/TSA mode. Use this option when the input consists of WGS or TSA master accessions provided in a TSV/CSV file.                                                               |
+| `--bioproject PRJNA...` | Run the pipeline in SRA mode using all SRA runs associated with a BioProject. The script retrieves the SRA run IDs automatically using NCBI Entrez Direct tools.                                    |
+| `--sra-list FILE`       | Run the pipeline in SRA mode using a user-provided text file with SRA run IDs. The file may contain `SRR`, `ERR`, or `DRR` accessions. Empty lines and comment lines starting with `#` are ignored. |
+| `-p, --profile FILE`    | Path to the HMM profile used for the search. This option is required.                                                                                                                               |
+| `-o, --outdir DIR`      | Output directory. Default: `results_pipeline`.                                                                                                                                                      |
+| `--evalue VALUE`        | Sequence-level E-value threshold for `hmmsearch`. Default: `1e-5`.                                                                                                                                  |
+| `--cpu N`               | Number of CPUs used by `hmmsearch`. Default: `4`.                                                                                                                                                   |
+| `--jobs N`              | Default number of parallel jobs. Default: `2`.                                                                                                                                                      |
+| `--tmpdir DIR`          | Directory used for temporary files. By default, the script uses `OUTDIR/tmp`.                                                                                                                       |
+| `-h, --help`            | Show the help message and exit.                                                                                                                                                                     |
+### WGS mode options
+| Option              | Description                                                                                                                                                            |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `-i, --input FILE`  | Input TSV or CSV file containing WGS/TSA master accessions. This option is required in `--wgs` mode.                                                                   |
+| `--col N`           | Column number containing the WGS/TSA master accession in the input file. Default: `1`.                                                                                 |
+| `--jobs-wgs N`      | Number of parallel jobs used in WGS mode. If this option is not specified, the value of `--jobs` is used.                                                              |
+| `--keep-negatives`  | Keep nucleotide, protein, and HMM output files for WGS datasets with no positive hits. By default, files from negative WGS datasets may be removed to save disk space. |
+| `--wgs-max-parts N` | Maximum number of WGS parts to check for each WGS/TSA master accession. Default: `200`.                                                                                |
+
+### Bioproject / SRA mode options
+| Option                                | Description                                                                                                                                                      |
+| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--max-runs N`                        | Limit the number of SRA runs to process. Default: `0`. A value of `0` means that all detected or provided runs are processed.                                    |
+| `--jobs-sra N`                        | Number of parallel jobs used in SRA mode. If this option is not specified, the value of `--jobs` is used.                                                        |
+| `--sra-threads N`                     | Number of threads used by `fasterq-dump`. Default: `6`.                                                                                                          |
+| `--assembler metaspades\|spades_meta` | Assembler used for SRA read assembly. Default: `metaspades`. Available values: `metaspades` and `spades_meta`.                                                   |
+| `--spades-threads N`                  | Number of threads used by SPAdes/metaSPAdes for each SRA run. Default: `8`.                                                                                      |
+| `--spades-memory GB`                  | Maximum memory, in GB, used by SPAdes/metaSPAdes for each SRA run. Default: `32`.                                                                                |
+| `--keep-assembly`                     | Keep SPAdes/metaSPAdes assembly folders, including assemblies from samples without positive hits. By default, some assemblies may be removed to save disk space. |
+| `--keep-reads`                        | Keep FASTQ files generated by `fasterq-dump`. By default, reads are removed after processing to save disk space.                                                 |
+## Examples
 ### Example with a BioProject
-
 ```bash
 ./hmmsearch_metagenome_pipeline.sh \
   --bioproject PRJNAxxxxxx \
@@ -135,7 +181,6 @@ flowchart TD
 ```
 
 ### Example with a TXT list of SRA IDs
-
 Create a file called `sra_ids.txt` with one SRA run ID per line:
 
 ```text
@@ -155,7 +200,6 @@ Then run:
 ```
 
 ### Example with WGS master IDs
-
 Create a TSV file with one WGS/TSA master accession per line, for example `wgs_masters.tsv`:
 
 ```text
