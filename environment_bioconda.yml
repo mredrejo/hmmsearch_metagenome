@@ -1,0 +1,28 @@
+name: bioconda
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  # Core shell/runtime utilities
+  - bash
+  - coreutils
+  - gawk
+  - grep
+  - sed
+  - curl
+  - wget
+  - pigz
+  - python>=3.10
+
+  # NCBI / SRA / BLAST tools
+  - entrez-direct
+  - sra-tools
+  - blast
+
+  # Assembly and gene prediction
+  - spades
+  - prodigal
+
+  # HMM search
+  - hmmer
