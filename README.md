@@ -2,7 +2,7 @@
 
 This repository contains Copilot-generated Bash scripts for analyzing NCBI genomes and metagenomes to detect proteins matching a user-provided HMM profile.
 
-The first script, `hmmsearch_metagenome_pipeline.sh`, can analyze genomes or metagenomes from a BioProject, a list of SRA IDs, or WGS master accessions. When necessary, (meta)SPAdes is used to assemble reads before downstream analysis. The second script then extracts contigs with positive HMM hits and runs BLASTN on them to identify the most likely reference sequence or species.
+The first script, `hmmsearch_metagenome_pipeline.sh`, can analyze genomes or metagenomes from a BioProject, a list of SRA IDs, or WGS master accessions. When necessary, (meta)SPAdes is used to assemble reads before downstream analysis. The second script,`blast_positive_contigs_remote.sh`, then extracts contigs with positive HMM hits and runs BLASTN on them to identify the most likely reference sequence or species.
 
 
 ## Installation
