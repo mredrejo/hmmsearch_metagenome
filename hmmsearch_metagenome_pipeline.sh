@@ -19,6 +19,12 @@ Opciones comunes:
   -o, --outdir DIR          Directorio salida (default: results_pipeline)
   --evalue X                Umbral E-value por SECUENCIA (default: 1e-5)
   --cpu N                   CPUs hmmsearch (default: 4)
+  --force                   Reprocesa todos los IDs y regenera resultados parciales/finales
+
+NCBI / E-utilities:
+  --ncbi-api-key KEY        API key de NCBI para E-utilities (opcional)
+  --ncbi-sleep SEC          Pausa mínima global entre llamadas E-utilities (default: 1)
+  --ncbi-retries N          Reintentos ante fallos/429 de E-utilities (default: 5)
 
 Paralelismo:
   --jobs N                  Jobs por defecto (default: 2)
@@ -40,7 +46,7 @@ SRA:
   --assembler metaspades|spades_meta (default: metaspades)
   --spades-threads N        Threads por SRR (default: 8)
   --spades-memory GB        RAM por SRR (default: 32)
-  --keep-assembly           Conserva assembly aunque negativo
+  --keep-assembly           Conserva carpetas assembly/ de SPAdes (default: borra tras copiar contigs)
   --keep-reads              Conserva reads (default: borra)
 
 Salidas:
@@ -62,6 +68,11 @@ PROFILE=""
 OUTDIR="results_pipeline"
 EVALUE="1e-5"
 CPU=4
+
+FORCE=0
+NCBI_API_KEY=""
+NCBI_SLEEP=1
+NCBI_RETRIES=5
 
 JOBS=2
 JOBS_WGS=""
@@ -92,6 +103,10 @@ while [[ $# -gt 0 ]]; do
     -o|--outdir) OUTDIR="${2:-}"; shift 2 ;;
     --evalue) EVALUE="${2:-}"; shift 2 ;;
     --cpu) CPU="${2:-}"; shift 2 ;;
+    --force) FORCE=1; shift ;;
+    --ncbi-api-key) NCBI_API_KEY="${2:-}"; shift 2 ;;
+    --ncbi-sleep) NCBI_SLEEP="${2:-}"; shift 2 ;;
+    --ncbi-retries) NCBI_RETRIES="${2:-}"; shift 2 ;;
     --jobs) JOBS="${2:-}"; shift 2 ;;
     --jobs-wgs) JOBS_WGS="${2:-}"; shift 2 ;;
     --jobs-sra) JOBS_SRA="${2:-}"; shift 2 ;;
@@ -116,9 +131,29 @@ done
 JOBS_WGS="${JOBS_WGS:-$JOBS}"
 JOBS_SRA="${JOBS_SRA:-$JOBS}"
 
-mkdir -p "$OUTDIR"/{nt,aa,hmm,logs,tmp,assembly,reads,parts}
+# Crear solo las carpetas necesarias para el modo seleccionado.
+# Comunes: logs, tmp, parts, nt, aa, hmm.
+mkdir -p "$OUTDIR"/{logs,tmp,parts,nt,aa,hmm}
+
+if [[ "$MODE" == "SRA" ]]; then
+  mkdir -p "$OUTDIR"/{assembly,reads}
+fi
+
 TMPDIR="${TMPDIR:-$OUTDIR/tmp}"
 mkdir -p "$TMPDIR"
+
+[[ "$NCBI_SLEEP" =~ ^[0-9]+$ ]] || { echo "[ERROR] --ncbi-sleep debe ser un entero >= 0"; exit 1; }
+[[ "$NCBI_RETRIES" =~ ^[0-9]+$ ]] || { echo "[ERROR] --ncbi-retries debe ser un entero >= 1"; exit 1; }
+[[ "$NCBI_RETRIES" -ge 1 ]] || { echo "[ERROR] --ncbi-retries debe ser >= 1"; exit 1; }
+
+# EDirect usa NCBI_API_KEY si está definida en el entorno.
+# No se imprime en logs para evitar exponerla accidentalmente.
+if [[ -n "$NCBI_API_KEY" ]]; then
+  export NCBI_API_KEY
+fi
+
+NCBI_RATE_LOCK="$TMPDIR/ncbi_eutils_rate.lock"
+NCBI_RATE_LAST="$TMPDIR/ncbi_eutils_last_request.txt"
 
 PIPELINE_LOG="$OUTDIR/logs/pipeline.log"
 : > "$PIPELINE_LOG"
@@ -137,6 +172,11 @@ log_error() { log_msg "ERROR" "$@"; }
 
 HITS="$OUTDIR/hits.tsv"
 SUMMARY="$OUTDIR/summary.tsv"
+
+if [[ "$FORCE" -eq 1 ]]; then
+  echo "[INFO] --force activado: eliminando resultados finales y parciales previos en $OUTDIR"
+  rm -f "$HITS" "$SUMMARY" "$OUTDIR"/parts/hits.*.tsv "$OUTDIR"/parts/summary.*.tsv 2>/dev/null || true
+fi
 
 HITS_HDR="contig_id\tprodigal_protein_id\thmm_query\tseq_evalue\tseq_score\tseq_bias\tsource_id"
 SUM_HDR="source_id\tstatus\thits\tbest_seq_evalue\tbest_seq_score"
@@ -223,6 +263,67 @@ pick_read_file() {
   fi
 }
 
+
+# ---------------- NCBI E-utilities throttling ----------------
+ncbi_rate_limit() {
+  # Rate limiter global compartido entre workers paralelos sin requerir flock.
+  # Serializa llamadas E-utilities usando mkdir atómico para evitar HTTP 429.
+  local lock="$NCBI_RATE_LOCK"
+  local last_file="$NCBI_RATE_LAST"
+  local waited=0
+
+  while ! mkdir "$lock" 2>/dev/null; do
+    sleep 0.2
+    waited=$((waited + 1))
+    # Eliminar lock obsoleto tras ~60 s si un proceso fue interrumpido.
+    if [[ "$waited" -gt 300 ]]; then
+      rm -rf "$lock" 2>/dev/null || true
+      waited=0
+    fi
+  done
+
+  local now last elapsed wait_for
+  now="$(date +%s)"
+  last=0
+  [[ -s "$last_file" ]] && last="$(cat "$last_file" 2>/dev/null || echo 0)"
+  elapsed=$((now - last))
+
+  if [[ "$NCBI_SLEEP" -gt 0 && "$elapsed" -lt "$NCBI_SLEEP" ]]; then
+    wait_for=$((NCBI_SLEEP - elapsed))
+    sleep "$wait_for"
+  fi
+
+  date +%s > "$last_file"
+  rmdir "$lock" 2>/dev/null || true
+}
+
+efetch_nuccore_gb_retry() {
+  local accession="$1"
+  local log="$2"
+  local attempt delay
+
+  for attempt in $(seq 1 "$NCBI_RETRIES"); do
+    ncbi_rate_limit
+    if efetch -db nuccore -id "$accession" -format gb 2>>"$log"; then
+      return 0
+    fi
+
+    delay=$((attempt * 5))
+    echo "[WARN] efetch failed for $accession; retry $attempt/$NCBI_RETRIES after ${delay}s" >> "$log"
+    sleep "$delay"
+  done
+
+  return 1
+}
+
+already_done() {
+  # Por defecto el pipeline no repite IDs con resumen parcial existente.
+  # --force desactiva este comportamiento.
+  local id="$1"
+  local summary_part="$OUTDIR/parts/summary.${id}.tsv"
+  [[ "$FORCE" -eq 0 && -s "$summary_part" ]]
+}
+
 # ---------------- simple parallel queue ----------------
 run_queue() {
   local jobs_max="$1"; shift
@@ -265,7 +366,9 @@ extract_master_id() {
 
 get_wgs_token_from_master() {
   local master="$1"
-  efetch -db nuccore -id "$master" -format gb | awk '
+  local log="${2:-/dev/stderr}"
+
+  efetch_nuccore_gb_retry "$master" "$log" | awk '
     /^[[:space:]]*(WGS|TSA)[[:space:]]+/ {
       line=$0
       sub(/^[[:space:]]*/, "", line)
@@ -275,12 +378,11 @@ get_wgs_token_from_master() {
       split(line, a, /[ \t]+/)
       x=a[1]
 
-      # Si es rango, quedarnos con la parte izquierda (JNMI01000001)
+      # Si es rango, quedarse con la parte izquierda (JNMI01000001)
       split(x, b, /-/)
       left=b[1]
 
       # Extraer token: 4-6 letras + 2 dígitos, SIN usar {m,n}
-      # ^[A-Z][A-Z][A-Z][A-Z][A-Z]?[A-Z]?[0-9][0-9]
       if (match(left, /^[A-Z][A-Z][A-Z][A-Z][A-Z]?[A-Z]?[0-9][0-9]/)) {
         print substr(left, RSTART, RLENGTH)
         exit
@@ -318,9 +420,19 @@ download_wgs_fasta_nt_ftp() {
 process_one_wgs_master() {
   local master="$1"
   local log="$OUTDIR/logs/${master}.wgs.log"
-  : > "$log"
+  local summary_part="$OUTDIR/parts/summary.${master}.tsv"
+  local hits_part="$OUTDIR/parts/hits.${master}.tsv"
 
-  local token; token="$(get_wgs_token_from_master "$master")"
+  if already_done "$master"; then
+    echo "[INFO] $master ya tiene $summary_part; se omite. Usa --force para reprocesar." >> "$log"
+    log_info "$master: ya procesado; omitido"
+    return 0
+  fi
+
+  : > "$log"
+  rm -f "$summary_part" "$hits_part" 2>/dev/null || true
+
+  local token; token="$(get_wgs_token_from_master "$master" "$log")"
   if [[ -z "$token" ]]; then
     echo -e "${master}\tWGS_TOKEN_FAIL\t0\tNA\tNA" > "$OUTDIR/parts/summary.${master}.tsv"
     return 0
@@ -397,7 +509,8 @@ prepare_sra_list_from_txt() {
   awk '
     BEGIN{IGNORECASE=0}
     {
-      gsub(//, "", $0)
+      gsub(/
+/, "", $0)
       if($0 ~ /^[[:space:]]*$/) next
       if($0 ~ /^[[:space:]]*#/) next
       print $1
@@ -455,7 +568,17 @@ cleanup_sra_intermediates() {
 process_one_srr() {
   local srr="$1"
   local log="$OUTDIR/logs/${srr}.sra.log"
+  local summary_part="$OUTDIR/parts/summary.${srr}.tsv"
+  local hits_part="$OUTDIR/parts/hits.${srr}.tsv"
+
+  if already_done "$srr"; then
+    echo "[INFO] $srr ya tiene $summary_part; se omite. Usa --force para reprocesar." >> "$log"
+    log_info "$srr: ya procesado; omitido"
+    return 0
+  fi
+
   : > "$log"
+  rm -f "$summary_part" "$hits_part" 2>/dev/null || true
   log_info "$srr: inicio procesamiento SRA"
 
   local srrdir="$OUTDIR/tmp/${srr}.prefetch"
@@ -535,12 +658,14 @@ process_one_srr() {
   if ! prodigal -i "$ntfa" -a "$aafa" -o "$gbk" -p meta -q >> "$log" 2>&1; then
     echo -e "${srr}	PRODIGAL_FAIL	0	NA	NA" > "$OUTDIR/parts/summary.${srr}.tsv"
     log_error "$srr: fallo en prodigal. Ver $log"
+    [[ "$KEEP_ASM" -eq 0 ]] && rm -rf "$asmdir" || true
     return 0
   fi
 
   if ! hmmsearch --cpu "$CPU" -E "$EVALUE" --tblout "$tbl" -o /dev/null "$PROFILE" "$aafa" >> "$log" 2>&1; then
     echo -e "${srr}	HMMSEARCH_FAIL	0	NA	NA" > "$OUTDIR/parts/summary.${srr}.tsv"
     log_error "$srr: fallo en hmmsearch. Ver $log"
+    [[ "$KEEP_ASM" -eq 0 ]] && rm -rf "$asmdir" || true
     return 0
   fi
 
@@ -555,6 +680,15 @@ process_one_srr() {
     tblout_to_hits_sra "$tbl" "$srr" > "$OUTDIR/parts/hits.${srr}.tsv"
     echo -e "${srr}	OK	${hits}	${bestE}	${bestS}" > "$OUTDIR/parts/summary.${srr}.tsv"
     log_info "$srr: OK hits=$hits bestE=$bestE bestS=$bestS"
+  fi
+
+  # Una vez copiados los contigs finales a nt/, la carpeta assembly/ deja de ser necesaria.
+  # Se elimina por defecto para ahorrar espacio; usar --keep-assembly para conservarla.
+  if [[ "$KEEP_ASM" -eq 0 ]]; then
+    rm -rf "$asmdir" 2>/dev/null || true
+    log_info "$srr: carpeta assembly eliminada; usa --keep-assembly para conservarla"
+  else
+    log_info "$srr: carpeta assembly conservada por --keep-assembly"
   fi
 
   [[ "$KEEP_READS" -eq 0 ]] && rm -rf "$readsdir" || true
@@ -611,7 +745,7 @@ merge_outputs() {
 }
 
 # ---------------- dispatch ----------------
-log_info "Inicio pipeline MODE=$MODE OUTDIR=$OUTDIR PROFILE=$PROFILE EVALUE=$EVALUE CPU=$CPU JOBS=$JOBS JOBS_WGS=$JOBS_WGS JOBS_SRA=$JOBS_SRA"
+log_info "Inicio pipeline MODE=$MODE OUTDIR=$OUTDIR PROFILE=$PROFILE EVALUE=$EVALUE CPU=$CPU JOBS=$JOBS JOBS_WGS=$JOBS_WGS JOBS_SRA=$JOBS_SRA FORCE=$FORCE KEEP_ASM=$KEEP_ASM NCBI_SLEEP=$NCBI_SLEEP NCBI_RETRIES=$NCBI_RETRIES"
 
 if [[ "$MODE" == "WGS" ]]; then
   log_info "Ejecutando modo WGS"
