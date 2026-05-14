@@ -52,11 +52,10 @@ flowchart TD
     L1 --> SRA1
     SRA1 --> SRA2[Assemble reads with SPAdes/metaSPAdes]
     SRA2 --> SRA3[Copy final contigs to nt/]
-    SRA3 --> SRA4[Predict proteins with Prodigal]
-    SRA4 --> SRA5[Search proteins with hmmsearch]
+    SRA3 --> W3
 
     W4 --> R1[(Script 1 results:<br/>hits.tsv, summary.tsv, nt/, aa/, hmm/, logs/)]
-    SRA5 --> R1
+   
 
     R1 --> S2[[Script 2:<br/>blast_positive_contigs_remote.sh]]
     S2 --> B2[Extract positive contigs from nt/ using hits.tsv]
